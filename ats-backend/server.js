@@ -3,7 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const multer = require('multer');
-const pdf = require('pdf-parse');
+const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const { OpenAI } = require('openai');
 const fs = require('fs');
@@ -38,15 +38,16 @@ const upload = multer({ storage: multer.memoryStorage() }); // Store in memory f
 // 4. Helper: Text Extraction
 const extractText = async (file) => {
     if (file.mimetype === 'application/pdf') {
-        const data = await pdf(file.buffer);
+        // Use the new variable name here
+        const data = await pdfParse(file.buffer); 
         return data.text;
-    } else if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    } 
+    else if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
         const result = await mammoth.extractRawText({ buffer: file.buffer });
         return result.value;
     }
     throw new Error('Unsupported file format');
 };
-
 // 5. The Main Route
 app.post('/api/analyze', upload.single('resume'), async (req, res) => {
     try {
