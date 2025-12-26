@@ -9,7 +9,10 @@ const { OpenAI } = require('openai');
 const fs = require('fs');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: ["https://ats-score-checker-silk.vercel.app/", "http://localhost:3000"],
+    credentials: true
+}));
 app.use(express.json());
 
 // 1. Database Connection
