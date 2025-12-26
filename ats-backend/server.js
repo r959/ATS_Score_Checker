@@ -3,24 +3,34 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const multer = require('multer');
-const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const { OpenAI } = require('openai');
 const fs = require('fs');
 
+// SAFE IMPORT for pdf-parse
+// This fixes the "pdfParse is not a function" error by handling different export styles
+let pdfParseLib = require('pdf-parse');
+if (typeof pdfParseLib !== 'function' && pdfParseLib.default) {
+    pdfParseLib = pdfParseLib.default;
+}
+
 const app = express();
+
+// 1. CORS Setup (CRITICAL FIX: Removed trailing slash from Vercel URL)
 app.use(cors({
-    origin: ["https://ats-score-checker-silk.vercel.app/", "http://localhost:3000"],
+    origin: ["[https://ats-score-checker-silk.vercel.app](https://ats-score-checker-silk.vercel.app)", "http://localhost:3000"],
+    methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true
 }));
+
 app.use(express.json());
 
-// 1. Database Connection
+// 2. Database Connection
 mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
     .then(() => console.log('MongoDB Connected'))
-    .catch(err => console.log(err));
+    .catch(err => console.error('MongoDB Connection Error:', err));
 
-// Schema to store results
+// Schema
 const AnalysisSchema = new mongoose.Schema({
     jobRole: String,
     score: Number,
@@ -29,95 +39,101 @@ const AnalysisSchema = new mongoose.Schema({
 });
 const Analysis = mongoose.model('Analysis', AnalysisSchema);
 
-// 2. OpenAI Setup (You need an API Key)
+// 3. OpenAI Setup
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// 3. Multer Setup (File Upload)
-const upload = multer({ storage: multer.memoryStorage() }); // Store in memory for immediate parsing
+// 4. Multer Setup
+const upload = multer({ storage: multer.memoryStorage() });
 
-// 4. Helper: Text Extraction
+// 5. Helper: Text Extraction
 const extractText = async (file) => {
-    if (file.mimetype === 'application/pdf') {
-        // Use the new variable name here
-        const data = await pdfParse(file.buffer); 
-        return data.text;
-    } 
-    else if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-        const result = await mammoth.extractRawText({ buffer: file.buffer });
-        return result.value;
+    try {
+        if (file.mimetype === 'application/pdf') {
+            const data = await pdfParseLib(file.buffer); 
+            return data.text;
+        } 
+        else if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+            const result = await mammoth.extractRawText({ buffer: file.buffer });
+            return result.value;
+        }
+        throw new Error(`Unsupported file type: ${file.mimetype}`);
+    } catch (error) {
+        console.error("Text Extraction Failed:", error);
+        throw error;
     }
-    throw new Error('Unsupported file format');
 };
-// 5. The Main Route
+
+// 6. Main Route
 app.post('/api/analyze', upload.single('resume'), async (req, res) => {
     try {
         const { jobDescription } = req.body;
         const resumeFile = req.file;
 
         if (!resumeFile || !jobDescription) {
-            return res.status(400).json({ error: 'Resume and Job Description are required' });
+            return res.status(400).json({ error: 'Resume file and Job Description are required' });
         }
 
-        // A. Extract Text from Resume
+        // A. Extract Text
+        console.log("Extracting text from resume...");
         const resumeText = await extractText(resumeFile);
+        console.log("Text extraction successful.");
 
-        // B. Send to AI for Analysis
+        // B. Send to AI
         const prompt = `
-  You are an expert Applicant Tracking System (ATS) and Technical Recruiter.
-  Your goal is to evaluate a candidate's resume against a specific Job Description (JD).
+            You are an expert Applicant Tracking System (ATS).
+            Evaluate this candidate's resume against the Job Description.
 
-  ---
-  RESUME TEXT:
-  "${resumeText.substring(0, 3000)}"
+            RESUME TEXT:
+            "${resumeText.substring(0, 3000)}"
 
-  JOB DESCRIPTION:
-  "${jobDescription.substring(0, 3000)}"
-  ---
+            JOB DESCRIPTION:
+            "${jobDescription.substring(0, 3000)}"
 
-  Please analyze the match and output a strict JSON object (no markdown, no extra text) with the following structure:
-  {
-    "score": (integer 0-100),
-    "missingKeywords": ["array", "of", "critical", "technical", "skills", "missing"],
-    "formattingIssues": ["array", "of", "potential", "formatting", "problems", "like", "columns", "or", "images"],
-    "feedback": "A concise 2-3 sentence summary of why the candidate is or isn't a good fit."
-  }
-
-  SCORING CRITERIA:
-  - 100-80: Strong Match (Has all critical hard skills and relevant experience).
-  - 79-50: Potential Match (Has some skills but misses key technologies).
-  - <50: Poor Match (Irrelevant experience or missing major requirements).
-
-  IMPORTANT:
-  - Focus heavily on "Hard Skills" (e.g., React, Node, AWS, Python) found in the JD but missing in the Resume.
-  - Do not hallucinate skills not present in the JD.
-`;
+            Output strictly in JSON format:
+            {
+                "score": (integer 0-100),
+                "missingKeywords": ["array", "of", "strings"],
+                "formattingIssues": ["array", "of", "strings"],
+                "feedback": "string"
+            }
+            Do not include markdown formatting (like \`\`\`json).
+        `;
 
         const completion = await openai.chat.completions.create({
-            messages: [{ role: "system", content: "You are a helpful ATS assistant." }, { role: "user", content: prompt }],
-            model: "gpt-3.5-turbo", // Or gpt-4
+            messages: [
+                { role: "system", content: "You are a helpful ATS assistant. Output strict JSON." },
+                { role: "user", content: prompt }
+            ],
+            model: "gpt-3.5-turbo",
         });
 
-        const resultText = completion.choices[0].message.content;
+        let resultText = completion.choices[0].message.content;
+
+        // C. Clean JSON (Fixes potential AI formatting errors)
+        resultText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
         
-        // Parse AI response (Ensure it handles JSON parsing safely in production)
         const analysisResult = JSON.parse(resultText);
 
-        // C. Save to MongoDB
-        const record = new Analysis({
-            jobRole: 'Extracted from JD', // You could ask AI to extract the title too
-            score: analysisResult.score,
-            missingKeywords: analysisResult.missingKeywords
-        });
-        await record.save();
+        // D. Save to DB (Optional: wrapped in try-catch so it doesn't fail the request if DB is down)
+        try {
+            const record = new Analysis({
+                jobRole: 'Extracted from JD',
+                score: analysisResult.score,
+                missingKeywords: analysisResult.missingKeywords
+            });
+            await record.save();
+        } catch (dbError) {
+            console.error("Database save failed (non-fatal):", dbError);
+        }
 
         res.json(analysisResult);
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Analysis failed' });
+        console.error("Analysis Error:", error);
+        // Return the actual error message to the frontend for better debugging
+        res.status(500).json({ error: 'Analysis failed', details: error.message });
     }
 });
 
-// Change the port line at the bottom to this:
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
