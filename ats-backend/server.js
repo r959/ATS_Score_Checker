@@ -9,7 +9,7 @@ const fs = require('fs');
 
 // SAFE IMPORT for pdf-parse
 // This fixes the "pdfParse is not a function" error by handling different export styles
-let pdfParseLib = require('pdf-parse');
+let pdfParseLib = require('pdf-lib');
 if (typeof pdfParseLib !== 'function' && pdfParseLib.default) {
     pdfParseLib = pdfParseLib.default;
 }
